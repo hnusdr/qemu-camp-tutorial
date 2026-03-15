@@ -12,9 +12,8 @@
 
 如果你已经开始读 QEMU 源码，你大概率会遇到这类困惑：
 
-- 为什么同样是 RISC-V，换个 `-machine`，设备布局完全不一样？
-- 为什么明明选了 CPU 型号，系统还是起不来？
-- 为什么设备代码写好了，却找不到它到底在什么时候被挂上去？
+- 为什么同样是 RISC-V，换个 `-machine`参数，设备布局完全不一样？比如有些machine会有特定设备，而另外一些machine却没有。
+- 为什么设备代码写好了，却找不到它到底在什么时候被挂上去？挂上去后，OS却又看不到？
 
 这些问题背后，很多都不是 CPU 细节问题，而是 machine 层的问题。
 
@@ -38,12 +37,11 @@
 - 各种 device 是外设；
 - bus 是连接关系；
 - interrupt controller 负责中断分发；
-- firmware / FDT / ACPI 负责启动信息；
 - 而 machine 负责把这些内容组织成“可启动、可运行、可扩展”的整机。
 
 所以 machine 一般会关心：
 
-- CPU 拓扑（几个 socket、每个多少 core/hart）；
+- CPU 拓扑（几个 socket、每个socket有多少 core/hart，也就是关注core → cluster → die→ package → socket这逐层递进的拓扑关系）；
 - 内存地图（RAM/ROM/MMIO 分布）；
 - 总线与设备挂载位置；
 - 中断路由；
@@ -52,9 +50,9 @@
 请注意：
 
 - CPU 模型描述“这颗 CPU 是谁”；
-- machine 模型描述“这台机器长什么样”。
+- machine 则是描述“这台机器长什么样”。
 
-这两个维度是正交的。
+这两个维度是正交的、解耦的。
 
 ---
 
@@ -74,18 +72,18 @@
 
 如果给初学者做类比，可以这样说：
 
-- `-machine` 像在选“主板+芯片组+默认设备布局方案”；
+- `-machine` 像在选“主板+默认设备布局方案”；
 - `-cpu` 像在选“插到这个方案里的处理器型号”。
 
 因此，很多“跑不起来”的问题并不是 CPU 本身不对，而是 machine 与设备布局、固件路径、内存地图等不匹配。
 
-这也是为什么我们学习 machine，不是锦上添花，而是排障必需。
+这也是为什么我们学习 machine，不是锦上添花，而是排除故障、问题定位所必需的技能。
 
 ---
 
 ## 三、QOM 视角：machine 在类型系统里长什么样
 
-QEMU 的对象系统叫 QOM。machine 也是 QOM 类型，不是“例外机制”。
+machine 也是 QOM 类型，不是“例外机制”。
 
 典型模式是：
 
@@ -110,7 +108,7 @@ QEMU 的对象系统叫 QOM。machine 也是 QOM 类型，不是“例外机制�
 
 ---
 
-## 四、运行时主流程：`-machine` 怎么走到 `mc->init()`
+## 四、创建主流程：命令行中的`-machine` 怎么走到 `mc->init()`源代码
 
 我们把运行时路径压缩成一个“3+1”流程：
 
@@ -118,11 +116,11 @@ QEMU 的对象系统叫 QOM。machine 也是 QOM 类型，不是“例外机制�
 
 QEMU 启动后解析参数，处理 `-machine`。如果你显式指定，就按名称匹配；没指定就选择默认机型。
 
-这一步产出的是一个 `MachineClass`。
+这一步产出的是一个 `MachineClass`。在 system/vl.c 中，select_machine()就负责这块流程
 
-### 第 2 步：实例化 machine 对象
+### 第 2 步：实例化 machine 对象。
 
-随后 QEMU 按选中的类去创建 `MachineState` 实例，并将对象挂入全局对象树。
+随后 QEMU 按选中的类去创建 `MachineState` 实例，并将对象挂入全局对象树。这对应qemu_create_machine函数
 
 到这里可以理解为：
 
@@ -146,6 +144,9 @@ QEMU 进入 `machine_run_board_init()` 后，核心动作是调用 `machine_clas
 - 再看 `init` 是否按预期创建对象并连线；
 - 最后再看单个设备内部逻辑。
 
+注意：到这里为止，所涉及的代码都是所有指令集架构共用的公共流程，而架构特定的代码则藏在若干个回调背后。
+
+
 ---
 
 ## 五、以 RISC-V `virt` 为例：把抽象概念落到实际动作
@@ -155,7 +156,7 @@ QEMU 进入 `machine_run_board_init()` 后，核心动作是调用 `machine_clas
 在 `virt_machine_init()` 这类函数中，我们通常会看到：
 
 1. 按 socket/cluster 维度创建 CPU 相关对象；
-2. 设置 `cpu-type`、`hartid-base`、`num-harts` 等属性；
+2. 设置 `cpu-type`、`hartid-base`、`num-harts` 等属性；然后sysbus_realize挂到系统总线上
 3. realize 到系统总线；
 4. 分配/映射 RAM、ROM 与 MMIO 区域；
 5. 初始化中断相关模块（如 PLIC/ACLINT/IMSIC）；
