@@ -108,6 +108,8 @@ void machine_run_board_init(MachineState *machine, const char *mem_path, Error *
 
 这条链路和 2025 训练营文档里的“机器创建流程”是一致的，只是这里更聚焦主板本身的职责。
 
+注意：到这里为止，所涉及的代码都是所有指令集架构共用的公共流程，而架构特定的代码则藏在若干个回调背后。
+
 ## 板级例子
 
 仍以 RISC-V `virt` 为例，`virt_machine_init()` 会按 socket 创建 CPU 集群，并配置 hart 号与数量：
@@ -132,11 +134,65 @@ for (i = 0; i < socket_count; i++) {
 在完整实现里，主板还会：
 
 - 分配内存区域（RAM/ROM/MMIO）；
-- 初始化中断控制器（PLIC/ACLINT/IMSIC 等）；
-- 挂载串口、RTC、PCIe、virtio-mmio；
-- 生成 FDT 或 ACPI 表。
+```C
 
-这就是“主板模型”的核心：把 CPU 与外设组织成一个可启动的系统。
+    /* register system main memory (actual RAM) */
+    memory_region_add_subregion(system_memory, s->memmap[VIRT_DRAM].base,
+                                machine->ram);
+
+    /* boot rom */
+    memory_region_init_rom(mask_rom, NULL, "riscv_virt_board.mrom",
+                           s->memmap[VIRT_MROM].size, &error_fatal);
+    memory_region_add_subregion(system_memory, s->memmap[VIRT_MROM].base,
+                                mask_rom);
+```
+
+- 初始化中断控制器（PLIC/ACLINT/IMSIC 等）；
+```c
+        if (virt_aclint_allowed() && s->have_aclint) {
+            if (s->aia_type == VIRT_AIA_TYPE_APLIC_IMSIC) {
+                /* Per-socket ACLINT MTIMER */
+                riscv_aclint_mtimer_create(s->memmap[VIRT_CLINT].base +
+                            i * RISCV_ACLINT_DEFAULT_MTIMER_SIZE,
+                        RISCV_ACLINT_DEFAULT_MTIMER_SIZE,
+                        base_hartid, hart_count,
+                        RISCV_ACLINT_DEFAULT_MTIMECMP,
+                        RISCV_ACLINT_DEFAULT_MTIME,
+                        RISCV_ACLINT_DEFAULT_TIMEBASE_FREQ, true);
+            }
+```
+
+- 挂载串口、RTC、PCIe、virtio-mmio；
+```c
+    gpex_pcie_init(system_memory, pcie_irqchip, s);
+
+    create_platform_bus(s, mmio_irqchip);
+
+    serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
+        0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
+        serial_hd(0), DEVICE_LITTLE_ENDIAN);
+```
+
+- 生成 FDT 或 ACPI 表。
+```c
+    /* load/create device tree */
+    if (machine->dtb) {
+        machine->fdt = load_device_tree(machine->dtb, &s->fdt_size);
+        if (!machine->fdt) {
+            error_report("load_device_tree() failed");
+            exit(1);
+        }
+    } else {
+        create_fdt(s);
+    }
+```
+
+这就是“主板模型”的核心：把 CPU 与外设组织成一个可启动的系统。你会发现机型 init 的叙事方式通常是：
+
+- 先“搭骨架”（CPU/内存/总线）；
+- 再“接神经”（中断）；
+- 再“装器官”（外设）；
+- 最后“准备开机信息”（FDT/ACPI/firmware）。
 
 ## 关键点
 
